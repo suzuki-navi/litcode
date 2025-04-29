@@ -80,6 +80,11 @@ sub main {
         return;
     }
 
+    if ($line_numbers) {
+        main_line_numbers();
+        return;
+    }
+
     my $markdown_lines = read_file_markdown_or_source($markdown_file_path);
     my ($rich_lines, $target_dir_file_lines, $key_values, $docker_options) = extract_code_blocks($markdown_file_path, $markdown_lines, undef, undef, undef);
     replace_key_values_in_temp_dir($target_dir_file_lines, $key_values);
@@ -162,6 +167,14 @@ sub main_conv_to_md {
     close $fh;
 
     unlink $markdown_file_path or die "Could not delete file '$markdown_file_path': $!";
+}
+
+sub main_line_numbers {
+    my $markdown_lines = read_file_markdown_or_source($markdown_file_path);
+    my ($rich_lines, $target_dir_file_lines, $key_values, $docker_options) = extract_code_blocks($markdown_file_path, $markdown_lines, undef, undef, undef);
+
+    my $result_lines = convert_to_line_number_file($rich_lines);
+    print join("\n", @$result_lines), "\n";
 }
 
 ####################################################################################################
@@ -247,9 +260,20 @@ sub extract_code_blocks {
             my $block_end = $code_block->{block_end};
             my @lines = @{$code_block->{lines}};
 
-            unless ($target_dir_file_lines->{$filename}) {
+            my $source_file_line_start;
+            my $source_file_line_end;
+            if ($target_dir_file_lines->{$filename}) {
+                $source_file_line_start = get_target_dir_file_line_count($target_dir_file_lines, $filename) + 1;
+                $source_file_line_end = $source_file_line_start + \@lines - 1;
+            } else {
                 $target_dir_file_lines->{$filename} = [];
+                $source_file_line_start = 1;
+                $source_file_line_end = \@lines;
             }
+
+            $code_block->{source_file_line_start} = $source_file_line_start;
+            $code_block->{source_file_line_end} = $source_file_line_end;
+
             push @{$target_dir_file_lines->{$filename}}, {
                 markdown_file_path => $markdown_file_path,
                 block_start => $block_start,
@@ -390,11 +414,42 @@ sub search_include_file {
 
 ####################################################################################################
 
+sub convert_to_line_number_file {
+    my ($rich_lines) = @_;
+
+    my $result_lines = [];
+
+    my $current_code_block = undef;
+    my $source_line_number = undef;
+
+    for (my $line_num = 1; $line_num <= @$rich_lines; $line_num++) {
+        my $line_info = $rich_lines->[$line_num - 1];
+
+        if ($line_info->{filename}) {
+            my $filename = $line_info->{filename};
+            my $result_line = "$filename:$source_line_number: " . $line_info->{line};
+            $source_line_number++;
+            push @$result_lines, $result_line;
+            next;
+        } elsif ($line_info->{code_block}) {
+            $current_code_block = $line_info->{code_block};
+            $source_line_number = $current_code_block->{source_file_line_start};
+        } else {
+            $current_code_block = undef;
+        }
+        my $result_line = $line_info->{line};
+        push @$result_lines, $result_line;
+    }
+
+    return $result_lines;
+}
+
+####################################################################################################
+
 sub convert_to_source_code_file {
     my ($rich_lines, $target_dir_file_lines, $filename) = @_;
 
     my $target_lines = get_target_dir_file_lines($target_dir_file_lines, $filename);
-
     my ($lang_label, $uniq_prefix) = get_lang_label_and_unique_prefix($filename, $target_lines);
 
     my $result_lines = [];
@@ -501,6 +556,17 @@ sub get_target_dir_file_lines {
         push @$lines, @$block_lines;
     }
     return $lines;
+}
+
+sub get_target_dir_file_line_count {
+    my ($target_dir_file_lines, $file_name) = @_;
+    my $blocks = $target_dir_file_lines->{$file_name};
+    my $line_count = 0;
+    foreach my $block (@$blocks) {
+        my $block_lines = $block->{lines};
+        $line_count += @$block_lines;
+    }
+    return $line_count;
 }
 
 ####################################################################################################
@@ -616,7 +682,7 @@ sub replace_key_values_in_temp_dir {
         foreach my $block (@$file_info) {
             for (my $i = 0; $i < @{$block->{lines}}; $i++) {
                 my $line = $block->{lines}->[$i];
-                my $line2 = replace_key_values($line, $key_values, $filename);
+                my $line2 = replace_key_values($line, $key_values, $key_blocks, $filename);
                 if ($line ne $line2) {
                     $block->{lines}->[$i] = $line2;
                 }
@@ -626,7 +692,7 @@ sub replace_key_values_in_temp_dir {
 }
 
 sub replace_key_values {
-    my ($content, $key_values, $filename) = @_;
+    my ($content, $key_values, $key_blocks, $filename) = @_;
     foreach my $key (keys %$key_values) {
         my $value = $key_values->{$key};
         $content =~ s/$key/$value/g;
